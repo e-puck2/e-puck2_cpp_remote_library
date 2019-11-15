@@ -2,6 +2,7 @@
 #include "epuck2.h"
 #include <stdio.h>
 #include <math.h>
+#include <chrono>
 
 Epuck2::Epuck2() {
     memset(port_name, 0x00, 50);
@@ -18,14 +19,14 @@ void Epuck2::clearCommunication(void) {
 
     sprintf(data, "\r");
     comm->writeData(data, 1, 10000);    // clear output buffer
-    sleepMs(50);
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
     comm->readData(data, 100, 200000);
 
     comm->flush();
 
     sprintf(data, "V\r");
     comm->writeData(data, 2, 10000);
-    sleepMs(50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     comm->readData(data, 55, 200000);
 
     //std::cout << "clear comm: " << data << std::endl;
@@ -45,44 +46,33 @@ int8_t Epuck2::establishConnection(char* portName) {
 	return 0;
 }
 
-#if defined(_WIN32) || defined(_WIN64)
-DWORD WINAPI Epuck2::StartCommThread(LPVOID lpParameter) {
-    Epuck2* epuck2 = (Epuck2*)lpParameter;
-    return epuck2->CommThread();
-}
-#else
-void* Epuck2::StartCommThread(void *context) {
-    return ((Epuck2*)context)->CommThread();
-}
-#endif
-
-#if defined(_WIN32) || defined(_WIN64)
-DWORD Epuck2::CommThread(void) {
-#else
-void* Epuck2::CommThread(void) {
-#endif
+// It would be better to add a parameter to let the user choose what frequency this thread should run at maximum.
+// This is to free a bit of bandwidth in the Bluetooth channel.
+void Epuck2::commThread(void) {
     int32_t mantis = 0;
     int16_t exp = 0;
     int16_t num_bytes = 0;
     while(1) {
         comm->flush();
-        setMutexTx();
+        mutexTx.lock();
         num_bytes = comm->writeData((char*)output_buffer, OUTPUT_BUFF_SIZE, 1000000);
-        freeMutexTx();
+        mutexTx.unlock();
         //std::cout << "bytes written = " << num_bytes << std::endl;
         //comm->flush();
-        setMutexRx();
+        mutexRx.lock();
         num_bytes = comm->readData((char*)input_buffer, INPUT_BUFF_SIZE, 100000);
         //std::cout << "bytes read = " << num_bytes << std::endl;
         if(num_bytes == 0) {
-            freeMutexRx();
+            mutexRx.unlock();
             closeConnection();
             establishConnection(port_name);
             continue;
         } else if(num_bytes < INPUT_BUFF_SIZE) {
-            freeMutexRx();
+            mutexRx.unlock();
             continue;
         }
+
+		last_msg_sent_flag = 1;	// Set the flag here because we are sure that this is the response to the last message sent, thus we are sure the message was actually sent and received by the robot.
 
         acc_raw[0] = (input_buffer[1]<<8) + input_buffer[0];
         acc_raw[1] = (input_buffer[3]<<8) + input_buffer[2];
@@ -176,40 +166,8 @@ void* Epuck2::CommThread(void) {
         ground_ambient[1] =  (input_buffer[99]<<8) + input_buffer[98];
         ground_ambient[2] =  (input_buffer[101]<<8) + input_buffer[100];
 
-        freeMutexRx();
+        mutexRx.unlock();
     }
-}
-
-void Epuck2::setMutexTx(void) {
-#if defined(_WIN32) || defined(_WIN64)
-    WaitForSingleObject(mutexTx, INFINITE);
-#else
-    pthread_mutex_lock(&mutexTx);
-#endif
-}
-
-void Epuck2::freeMutexTx(void) {
-#if defined(_WIN32) || defined(_WIN64)
-    ReleaseMutex(mutexTx);
-#else
-    pthread_mutex_unlock(&mutexTx);
-#endif
-}
-
-void Epuck2::setMutexRx(void) {
-#if defined(_WIN32) || defined(_WIN64)
-    WaitForSingleObject(mutexRx, INFINITE);
-#else
-    pthread_mutex_lock(&mutexRx);
-#endif
-}
-
-void Epuck2::freeMutexRx(void) {
-#if defined(_WIN32) || defined(_WIN64)
-    ReleaseMutex(mutexRx);
-#else
-    pthread_mutex_unlock(&mutexRx);
-#endif
 }
 
 int8_t Epuck2::startCommunication(char* portName) {
@@ -218,22 +176,7 @@ int8_t Epuck2::startCommunication(char* portName) {
     if(err < 0) {
         return err;
     }
-    #if defined(_WIN32) || defined(_WIN64)
-        commThread = CreateThread(NULL, 0, StartCommThread, (void*)this, 0, &commThreadId);
-        mutexTx = CreateMutex(NULL, FALSE, NULL);
-        mutexRx = CreateMutex(NULL, FALSE, NULL);
-    #else
-        if(pthread_create(&commThread, NULL, StartCommThread, (void*)this)) {
-            fprintf(stderr, "Error creating thread\n");
-        }
-        if (pthread_mutex_init(&mutexTx, NULL) != 0) {
-            printf("\n mutex init failed\n");
-        }
-        if (pthread_mutex_init(&mutexRx, NULL) != 0) {
-            printf("\n mutex init failed\n");
-        }
-    #endif
-
+	comm_thread = std::thread (&Epuck2::commThread, this);
     return err;
 }
 
@@ -246,17 +189,13 @@ void Epuck2::closeConnection(void) {
 
 void Epuck2::stopCommunication() {
     closeConnection();
+	if(comm_thread.joinable()) {
+		comm_thread.~thread();
+	}
+}
 
-    #if defined(_WIN32) || defined(_WIN64)
-        TerminateThread(commThread, 0);
-        CloseHandle(commThread);
-        CloseHandle(mutexTx);
-        CloseHandle(mutexRx);
-    #else
-        pthread_cancel(commThread);
-        pthread_mutex_destroy(&mutexTx);
-        pthread_mutex_destroy(&mutexRx);
-    #endif
+char* Epuck2::getPortName(void) {
+	return port_name;
 }
 
 int16_t Epuck2::getAccelerometerRaw(uint8_t id) {
@@ -364,26 +303,26 @@ uint16_t Epuck2::getGroundAmbient(uint8_t id) {
 }
 
 void Epuck2::setSpeed(int16_t left, int16_t right) {
-    setMutexTx();
+    mutexTx.lock();
     output_buffer[2] = left & 0xFF;
     output_buffer[3] = (left>>8) & 0xFF;
     output_buffer[4] = right & 0xFF;
     output_buffer[5] = (right>>8) & 0xFF;
-    freeMutexTx();
+    mutexTx.unlock();
 }
 
 void Epuck2::setLed(uint8_t id, uint8_t state) {
-    setMutexTx();
+    mutexTx.lock();
     if(state) {
         output_buffer[6] |= (1<<id);
     } else {
         output_buffer[6] &= ~(1<<id);
     }
-    freeMutexTx();
+    mutexTx.unlock();
 }
 
 void Epuck2::setRgbLeds(uint8_t red2, uint8_t green2, uint8_t blue2, uint8_t red4, uint8_t green4, uint8_t blue4, uint8_t red6, uint8_t green6, uint8_t blue6, uint8_t red8, uint8_t green8, uint8_t blue8) {
-    setMutexTx();
+    mutexTx.lock();
     output_buffer[7] = red2;
     output_buffer[8] = green2;
     output_buffer[9] = blue2;
@@ -396,21 +335,31 @@ void Epuck2::setRgbLeds(uint8_t red2, uint8_t green2, uint8_t blue2, uint8_t red
     output_buffer[16] = red8;
     output_buffer[17] = green8;
     output_buffer[18] = blue8;
-    freeMutexTx();
+    mutexTx.unlock();
 }
 
 void Epuck2::setSound(uint8_t id) {
-    setMutexTx();
+    mutexTx.lock();
     output_buffer[19] = id;
-    freeMutexTx();
+    mutexTx.unlock();
 }
 
-void Epuck2::sleepMs(uint32_t ms) {
-    #if defined(_WIN32) || defined(_WIN64)
-        Sleep(ms);
-    #else
-        usleep(ms*1000);
-    #endif
+uint8_t Epuck2::waitForUpdate(uint32_t us) {
+	std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now();
+	std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
+
+	mutexRx.lock();
+    last_msg_sent_flag = 0;
+	mutexRx.unlock();
+
+    while(last_msg_sent_flag == 0) {
+		now = std::chrono::system_clock::now();
+		if(std::chrono::duration_cast<std::chrono::microseconds>(now - start).count() > us) {
+			return 1;
+		}
+    }
+
+    return 0;
 }
 
 Epuck2::~Epuck2() {

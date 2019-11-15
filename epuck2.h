@@ -2,11 +2,8 @@
 #define EPUCK2_H
 
 #include "SerialComm.h"
-#if defined(_WIN32) || defined(_WIN64)
-	#include "windows.h"
-#else
-    #include "pthread.h"
-#endif
+#include <thread>
+#include <mutex>
 
 #define INPUT_BUFF_SIZE 103
 #define OUTPUT_BUFF_SIZE 22
@@ -67,6 +64,14 @@ class Epuck2
         * \return none
         */
 		void stopCommunication(void);
+
+        /**
+        * \brief This function can be used to know what serial port the robot is connected.
+        * \return serial port name.
+        */		
+		char * getPortName(void);
+		
+		uint8_t waitForUpdate(uint32_t us);
 
 		/**
         * \brief Accelerometer raw axes values.
@@ -249,43 +254,10 @@ class Epuck2
 		void clearCommunication(void);
 
         /**
-        * \brief Enable the mutex on the transmission buffer.
+        * \brief Function called in a separate thread. Inside this function the data with the robot are exchanged and the received data are parsed.
         * \return none.
-        */
-		void setMutexTx(void);
-
-        /**
-        * \brief Disable the mutex on the transmission buffer.
-        * \return none.
-        */
-		void freeMutexTx(void);
-
-        /**
-        * \brief Enable the mutex on the receive buffer.
-        * \return none.
-        */
-        void setMutexRx(void);
-
-        /**
-        * \brief Disable the mutex on the receive buffer.
-        * \return none.
-        */
-        void freeMutexRx(void);
-
-        #if defined(_WIN32) || defined(_WIN64)
-        static DWORD WINAPI StartCommThread(LPVOID lpParameter);
-        DWORD CommThread(void);
-        #else
-		static void* StartCommThread(void *context);
-        void* CommThread(void);
-        #endif
-
-        /**
-        * \brief Function used to sleep an amount of milliseconds.
-        * \param ms milliseconds to sleep.
-        * \return none.
-        */
-        void sleepMs(uint32_t ms);
+        */		
+		void commThread(void);
 
         char port_name[50]; /**< Bluetooth connection port name (last update) */
 		uint8_t output_buffer[OUTPUT_BUFF_SIZE]; /**< Transmission buffer: set all actuators (0x09) + actuators data (19 bytes, refer to https://www.gctronic.com/doc/index.php?title=e-puck2_PC_side_development#WiFi_2) + get all sensors (0x08) + end delimiter (0x00) */
@@ -308,17 +280,11 @@ class Epuck2
         uint8_t selector; /**< Selector position (last update) */
         uint16_t ground_proximity[3]; /**< Ground extension IR proximity values (last update) */
 		uint16_t ground_ambient[3]; /**< Ground extension IR proximity ambient values (last update) */
+		uint8_t last_msg_sent_flag; /**< Flag indicating whether the last message was sent and received by the robot. */
 		SerialComm *comm;	/**< Pointer to the serial port for the Bluetooth device*/
-		#if defined(_WIN32) || defined(_WIN64)
-            DWORD commThreadId;
-            HANDLE commThread;
-            HANDLE mutexTx;
-            HANDLE mutexRx;
-		#else
-            pthread_t commThread;
-            pthread_mutex_t mutexTx;
-            pthread_mutex_t mutexRx;
-		#endif
+		std::mutex mutexTx; /**< Mutex on the transmission buffer. */
+		std::mutex mutexRx; /**< Mutex on the receive buffer. */
+		std::thread comm_thread; /**< Communication thread handle. */
 
 
 };
